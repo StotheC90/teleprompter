@@ -16,6 +16,7 @@
   --font-size: 42px;
   --font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   --focus-size: 30vh;
+  --line-width: 80;
   --btn-bg: #222;
   --btn-hover: #333;
   --surface: #111;
@@ -282,7 +283,7 @@ input[type="range"]::-moz-range-thumb {
   font-size: var(--font-size);
   font-family: var(--font-family);
   line-height: 1.6;
-  max-width: 1000px;
+  max-width: calc(var(--line-width) * 1%);
   margin: 0 auto;
   word-wrap: break-word;
 }
@@ -649,6 +650,11 @@ input[type="range"]::-moz-range-thumb {
       <span class="value-display" id="font-value">42px</span>
     </div>
     <div class="toolbar-group">
+      <label>Breite</label>
+      <input type="range" id="width-slider" min="30" max="100" step="5" value="80">
+      <span class="value-display" id="width-value">80%</span>
+    </div>
+    <div class="toolbar-group">
       <label>Font</label>
       <select id="font-toggle">
         <option value="sans">Sans-Serif</option>
@@ -941,6 +947,7 @@ Bis zum nächsten Video!`
     speed: 2,
     fontSize: 42,
     fontFamily: 'sans',
+    lineWidth: 80,
     text: '',
     scrollPos: 0,
     isPlaying: false,
@@ -967,6 +974,8 @@ Bis zum nächsten Video!`
     fontSlider: $('font-slider'),
     fontValue: $('font-value'),
     fontToggle: $('font-toggle'),
+    widthSlider: $('width-slider'),
+    widthValue: $('width-value'),
     templateSelect: $('template-select'),
     wordCount: $('word-count'),
     readTime: $('read-time'),
@@ -1021,6 +1030,7 @@ Bis zum nächsten Video!`
         speed: state.speed,
         fontSize: state.fontSize,
         fontFamily: state.fontFamily,
+        lineWidth: state.lineWidth,
         text: state.text,
         scrollPos: state.scrollPos
       }));
@@ -1035,6 +1045,7 @@ Bis zum nächsten Video!`
       if (saved.speed != null) state.speed = saved.speed;
       if (saved.fontSize != null) state.fontSize = saved.fontSize;
       if (saved.fontFamily != null) state.fontFamily = saved.fontFamily;
+      if (saved.lineWidth != null) state.lineWidth = saved.lineWidth;
       if (saved.text != null) state.text = saved.text;
       if (saved.scrollPos != null) state.scrollPos = saved.scrollPos;
     } catch (e) { /* corrupt data */ }
@@ -1126,6 +1137,11 @@ Bis zum nächsten Video!`
     dom.fontSlider.value = state.fontSize;
     dom.fontValue.textContent = state.fontSize + 'px';
     document.documentElement.style.setProperty('--font-size', state.fontSize + 'px');
+
+    // Line width
+    dom.widthSlider.value = state.lineWidth;
+    dom.widthValue.textContent = state.lineWidth + '%';
+    document.documentElement.style.setProperty('--line-width', state.lineWidth);
 
     // Font family
     dom.fontToggle.value = state.fontFamily;
@@ -2000,6 +2016,13 @@ Bis zum nächsten Video!`
 
   dom.fontSlider.addEventListener('input', () => {
     setFontSize(parseInt(dom.fontSlider.value, 10));
+  });
+
+  dom.widthSlider.addEventListener('input', () => {
+    state.lineWidth = parseInt(dom.widthSlider.value, 10);
+    dom.widthValue.textContent = state.lineWidth + '%';
+    document.documentElement.style.setProperty('--line-width', state.lineWidth);
+    saveState();
   });
 
   dom.fontToggle.addEventListener('change', () => {
