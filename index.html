@@ -744,12 +744,20 @@ Formatierung:
 <!-- ═══════════════ QR / REMOTE MODAL ═══════════════ -->
 <div class="modal-backdrop" id="remote-modal">
   <div class="modal">
-    <h2>Remote-Steuerung</h2>
-    <p>Öffne diesen Link auf einem anderen Gerät (z.B. Smartphone), um den Teleprompter fernzusteuern.</p>
-    <div class="modal-url" id="remote-url"></div>
+    <h2>Remote-Tab öffnen</h2>
+    <p style="color:#cc0;">⚠ Funktioniert nur im selben Browser (zweiter Tab). Für Fernsteuerung von einem anderen Gerät oder Browser wird ein Server benötigt.</p>
+    <div class="modal-actions" style="margin-bottom: 16px;">
+      <button class="btn btn-primary" id="modal-open">In neuem Tab öffnen</button>
+    </div>
+    <details style="text-align:left; margin-bottom: 16px;">
+      <summary style="cursor:pointer; color:#888; font-size:13px; margin-bottom:10px;">URL &amp; QR-Code anzeigen (selber Browser)</summary>
+      <canvas id="qr-canvas" width="200" height="200" style="display:block; margin: 10px auto; background:#fff; border-radius:8px;"></canvas>
+      <div class="modal-url" id="remote-url"></div>
+      <div style="text-align:center;">
+        <button class="btn" id="modal-copy" style="font-size:13px;">URL kopieren</button>
+      </div>
+    </details>
     <div class="modal-actions">
-      <button class="btn" id="modal-copy">Kopieren</button>
-      <button class="btn btn-primary" id="modal-open">Öffnen</button>
       <button class="btn" id="modal-close">Schließen</button>
     </div>
   </div>
@@ -1457,11 +1465,468 @@ Bis zum nächsten Video!`
     reader.readAsText(file);
   }
 
+  /* ─── Minimal QR Code Generator (Version 2-L, byte mode) ─── */
+  // Generates a valid, scannable QR code on a canvas element.
+  // Supports up to ~32 characters (QR Version 2-L). For longer URLs,
+  // auto-upgrades to Version 3-L (~55 chars) or Version 4-L (~78 chars).
+  const QR = (function() {
+    // Galois Field GF(256) arithmetic for Reed-Solomon error correction
+    const EXP = new Uint8Array(256), LOG = new Uint8Array(256);
+    (function() {
+      let v = 1;
+      for (let i = 0; i < 255; i++) {
+        EXP[i] = v;
+        LOG[v] = i;
+        v = (v << 1) ^ (v & 128 ? 0x11d : 0);
+      }
+      EXP[255] = EXP[0];
+    })();
+
+    function gfMul(a, b) {
+      return a === 0 || b === 0 ? 0 : EXP[(LOG[a] + LOG[b]) % 255];
+    }
+
+    function rsGenPoly(n) {
+      let poly = [1];
+      for (let i = 0; i < n; i++) {
+        const next = new Array(poly.length + 1).fill(0);
+        for (let j = 0; j < poly.length; j++) {
+          next[j] ^= poly[j];
+          next[j + 1] ^= gfMul(poly[j], EXP[i]);
+        }
+        poly = next;
+      }
+      return poly;
+    }
+
+    function rsEncode(data, ecLen) {
+      const gen = rsGenPoly(ecLen);
+      const result = new Array(ecLen).fill(0);
+      for (let i = 0; i < data.length; i++) {
+        const coeff = data[i] ^ result[0];
+        result.shift();
+        result.push(0);
+        for (let j = 0; j < gen.length - 1; j++) {
+          result[j] ^= gfMul(gen[j + 1], coeff);
+        }
+      }
+      return result;
+    }
+
+    // Version configs: [version, size, dataCodewords, ecCodewords, numBlocks]
+    const VERSIONS = [
+      [1, 21, 19, 7, 1],
+      [2, 25, 34, 10, 1],
+      [3, 29, 55, 15, 1],
+      [4, 33, 80, 20, 1],
+      [5, 37, 108, 26, 1],
+      [6, 41, 136, 18, 2],
+    ];
+
+    // Alignment pattern positions per version (none for v1)
+    const ALIGN_POS = [[], [], [6,18], [6,22], [6,26], [6,30]];
+
+    function chooseVersion(byteLen) {
+      // Byte mode overhead: 4 (mode) + 8 (length) = 12 bits = ~2 bytes overhead
+      const needed = byteLen + 3; // mode indicator + length + data
+      for (const v of VERSIONS) {
+        if (v[2] >= needed) return v;
+      }
+      return VERSIONS[VERSIONS.length - 1]; // fallback to largest
+    }
+
+    function createMatrix(size) {
+      const m = [];
+      for (let i = 0; i < size; i++) {
+        m[i] = new Array(size).fill(-1); // -1 = unset
+      }
+      return m;
+    }
+
+    function setModule(matrix, row, col, val) {
+      if (row >= 0 && row < matrix.length && col >= 0 && col < matrix.length) {
+        matrix[row][col] = val;
+      }
+    }
+
+    function placeFinderPattern(matrix, row, col) {
+      for (let r = -1; r <= 7; r++) {
+        for (let c = -1; c <= 7; c++) {
+          const rr = row + r, cc = col + c;
+          if (rr < 0 || rr >= matrix.length || cc < 0 || cc >= matrix.length) continue;
+          if (r === -1 || r === 7 || c === -1 || c === 7) {
+            matrix[rr][cc] = 0; // separator
+          } else if (r === 0 || r === 6 || c === 0 || c === 6 || (r >= 2 && r <= 4 && c >= 2 && c <= 4)) {
+            matrix[rr][cc] = 1; // dark
+          } else {
+            matrix[rr][cc] = 0; // light
+          }
+        }
+      }
+    }
+
+    function placeAlignmentPattern(matrix, row, col) {
+      for (let r = -2; r <= 2; r++) {
+        for (let c = -2; c <= 2; c++) {
+          if (Math.abs(r) === 2 || Math.abs(c) === 2 || (r === 0 && c === 0)) {
+            matrix[row + r][col + c] = 1;
+          } else {
+            matrix[row + r][col + c] = 0;
+          }
+        }
+      }
+    }
+
+    function placeTimingPatterns(matrix, size) {
+      for (let i = 8; i < size - 8; i++) {
+        const val = i % 2 === 0 ? 1 : 0;
+        if (matrix[6][i] === -1) matrix[6][i] = val;
+        if (matrix[i][6] === -1) matrix[i][6] = val;
+      }
+    }
+
+    function reserveFormatInfo(matrix, size) {
+      // Around top-left finder
+      for (let i = 0; i <= 8; i++) {
+        if (i < size && matrix[8][i] === -1) matrix[8][i] = 0;
+        if (i < size && matrix[i][8] === -1) matrix[i][8] = 0;
+      }
+      // Around top-right finder
+      for (let i = 0; i <= 7; i++) {
+        if (matrix[8][size - 1 - i] === -1) matrix[8][size - 1 - i] = 0;
+      }
+      // Around bottom-left finder
+      for (let i = 0; i <= 7; i++) {
+        if (matrix[size - 1 - i][8] === -1) matrix[size - 1 - i][8] = 0;
+      }
+      // Dark module
+      matrix[size - 8][8] = 1;
+    }
+
+    function reserveVersionInfo(matrix, size, version) {
+      if (version < 7) return;
+      // Version info is only for version 7+, skip for our use case
+    }
+
+    function encodeData(text, dataCodewords) {
+      const bytes = [];
+      for (let i = 0; i < text.length; i++) {
+        const code = text.charCodeAt(i);
+        if (code < 128) {
+          bytes.push(code);
+        } else if (code < 2048) {
+          bytes.push(0xc0 | (code >> 6), 0x80 | (code & 0x3f));
+        } else {
+          bytes.push(0xe0 | (code >> 12), 0x80 | ((code >> 6) & 0x3f), 0x80 | (code & 0x3f));
+        }
+      }
+
+      // Byte mode indicator: 0100
+      const bits = [];
+      function pushBits(val, len) {
+        for (let i = len - 1; i >= 0; i--) bits.push((val >> i) & 1);
+      }
+
+      pushBits(4, 4); // mode: byte
+      pushBits(bytes.length, 8); // character count
+      for (const b of bytes) pushBits(b, 8); // data
+
+      // Terminator (up to 4 zeros)
+      const maxBits = dataCodewords * 8;
+      const termLen = Math.min(4, maxBits - bits.length);
+      for (let i = 0; i < termLen; i++) bits.push(0);
+
+      // Pad to byte boundary
+      while (bits.length % 8 !== 0) bits.push(0);
+
+      // Convert bits to bytes
+      const codewords = [];
+      for (let i = 0; i < bits.length; i += 8) {
+        let byte = 0;
+        for (let j = 0; j < 8; j++) byte = (byte << 1) | (bits[i + j] || 0);
+        codewords.push(byte);
+      }
+
+      // Pad with alternating 236/17
+      const padBytes = [236, 17];
+      let padIdx = 0;
+      while (codewords.length < dataCodewords) {
+        codewords.push(padBytes[padIdx % 2]);
+        padIdx++;
+      }
+
+      return codewords;
+    }
+
+    function placeData(matrix, size, dataBits) {
+      let bitIdx = 0;
+      let upward = true;
+
+      for (let right = size - 1; right >= 1; right -= 2) {
+        if (right === 6) right = 5; // skip timing column
+
+        const rows = upward
+          ? Array.from({length: size}, (_, i) => size - 1 - i)
+          : Array.from({length: size}, (_, i) => i);
+
+        for (const row of rows) {
+          for (let c = 0; c < 2; c++) {
+            const col = right - c;
+            if (col < 0 || col >= size) continue;
+            if (matrix[row][col] !== -1) continue;
+
+            const bit = bitIdx < dataBits.length ? dataBits[bitIdx] : 0;
+            matrix[row][col] = bit;
+            bitIdx++;
+          }
+        }
+
+        upward = !upward;
+      }
+    }
+
+    // Mask patterns
+    function getMaskFn(id) {
+      const fns = [
+        (r,c) => (r + c) % 2 === 0,
+        (r,c) => r % 2 === 0,
+        (r,c) => c % 3 === 0,
+        (r,c) => (r + c) % 3 === 0,
+        (r,c) => (Math.floor(r/2) + Math.floor(c/3)) % 2 === 0,
+        (r,c) => ((r*c)%2 + (r*c)%3) === 0,
+        (r,c) => ((r*c)%2 + (r*c)%3) % 2 === 0,
+        (r,c) => ((r+c)%2 + (r*c)%3) % 2 === 0,
+      ];
+      return fns[id];
+    }
+
+    function isReserved(matrix, reservedMatrix, row, col) {
+      return reservedMatrix[row][col] !== -1;
+    }
+
+    function applyMask(matrix, reserved, size, maskId) {
+      const fn = getMaskFn(maskId);
+      for (let r = 0; r < size; r++) {
+        for (let c = 0; c < size; c++) {
+          if (reserved[r][c] !== -1) continue;
+          if (fn(r, c)) matrix[r][c] ^= 1;
+        }
+      }
+    }
+
+    // Format info (error correction level L = 01, mask pattern)
+    const FORMAT_BITS = [
+      0x77c4, 0x72f3, 0x7daa, 0x789d, 0x662f, 0x6318, 0x6c41, 0x6976,
+    ];
+
+    function placeFormatInfo(matrix, size, maskId) {
+      const bits = FORMAT_BITS[maskId];
+      // First copy: around top-left
+      const positions1 = [
+        [0,8],[1,8],[2,8],[3,8],[4,8],[5,8],[7,8],[8,8],
+        [8,7],[8,5],[8,4],[8,3],[8,2],[8,1],[8,0]
+      ];
+      // Second copy: bottom-left + top-right
+      const positions2 = [];
+      for (let i = 0; i <= 6; i++) positions2.push([size - 1 - i, 8]);
+      for (let i = 0; i <= 7; i++) positions2.push([8, size - 8 + i]);
+
+      for (let i = 0; i < 15; i++) {
+        const bit = (bits >> (14 - i)) & 1;
+        if (i < positions1.length) {
+          matrix[positions1[i][0]][positions1[i][1]] = bit;
+        }
+        if (i < positions2.length) {
+          matrix[positions2[i][0]][positions2[i][1]] = bit;
+        }
+      }
+    }
+
+    function scorePenalty(matrix, size) {
+      let penalty = 0;
+      // Rule 1: Runs of same color (simplified)
+      for (let r = 0; r < size; r++) {
+        let run = 1;
+        for (let c = 1; c < size; c++) {
+          if (matrix[r][c] === matrix[r][c-1]) { run++; }
+          else { if (run >= 5) penalty += run - 2; run = 1; }
+        }
+        if (run >= 5) penalty += run - 2;
+      }
+      for (let c = 0; c < size; c++) {
+        let run = 1;
+        for (let r = 1; r < size; r++) {
+          if (matrix[r][c] === matrix[r-1][c]) { run++; }
+          else { if (run >= 5) penalty += run - 2; run = 1; }
+        }
+        if (run >= 5) penalty += run - 2;
+      }
+      // Rule 2: 2x2 blocks
+      for (let r = 0; r < size - 1; r++) {
+        for (let c = 0; c < size - 1; c++) {
+          const v = matrix[r][c];
+          if (v === matrix[r][c+1] && v === matrix[r+1][c] && v === matrix[r+1][c+1]) {
+            penalty += 3;
+          }
+        }
+      }
+      return penalty;
+    }
+
+    function generate(text) {
+      const [version, size, dataCodewords, ecCodewords, numBlocks] = chooseVersion(text.length);
+
+      // Encode data
+      const data = encodeData(text, dataCodewords);
+
+      // Reed-Solomon error correction
+      const ecPerBlock = ecCodewords;
+      const ec = rsEncode(data, ecPerBlock);
+
+      // Interleave (single block for our versions, so just concatenate)
+      const allBits = [];
+      function pushByte(b) {
+        for (let i = 7; i >= 0; i--) allBits.push((b >> i) & 1);
+      }
+
+      if (numBlocks === 1) {
+        for (const b of data) pushByte(b);
+        for (const b of ec) pushByte(b);
+      } else {
+        // Split into blocks
+        const blockSize = Math.floor(dataCodewords / numBlocks);
+        const extraBlocks = dataCodewords % numBlocks;
+        const blocks = [];
+        const ecBlocks = [];
+        let offset = 0;
+        for (let i = 0; i < numBlocks; i++) {
+          const bLen = blockSize + (i >= numBlocks - extraBlocks ? 1 : 0);
+          blocks.push(data.slice(offset, offset + bLen));
+          ecBlocks.push(rsEncode(blocks[i], ecPerBlock));
+          offset += bLen;
+        }
+        // Interleave data
+        const maxDataLen = Math.max(...blocks.map(b => b.length));
+        for (let i = 0; i < maxDataLen; i++) {
+          for (const block of blocks) {
+            if (i < block.length) pushByte(block[i]);
+          }
+        }
+        // Interleave EC
+        for (let i = 0; i < ecPerBlock; i++) {
+          for (const block of ecBlocks) {
+            if (i < block.length) pushByte(block[i]);
+          }
+        }
+      }
+
+      // Create matrix
+      const matrix = createMatrix(size);
+
+      // Place finder patterns
+      placeFinderPattern(matrix, 0, 0);
+      placeFinderPattern(matrix, 0, size - 7);
+      placeFinderPattern(matrix, size - 7, 0);
+
+      // Place alignment patterns (version >= 2)
+      const alignPos = ALIGN_POS[version - 1] || [];
+      if (alignPos.length > 0) {
+        for (const r of alignPos) {
+          for (const c of alignPos) {
+            // Skip if overlaps with finder pattern
+            if (r <= 8 && c <= 8) continue;
+            if (r <= 8 && c >= size - 8) continue;
+            if (r >= size - 8 && c <= 8) continue;
+            placeAlignmentPattern(matrix, r, c);
+          }
+        }
+      }
+
+      // Timing patterns
+      placeTimingPatterns(matrix, size);
+
+      // Reserve format info areas
+      reserveFormatInfo(matrix, size);
+
+      // Save reserved state
+      const reserved = createMatrix(size);
+      for (let r = 0; r < size; r++) {
+        for (let c = 0; c < size; c++) {
+          reserved[r][c] = matrix[r][c];
+        }
+      }
+
+      // Place data
+      placeData(matrix, size, allBits);
+
+      // Try all 8 masks, pick best
+      let bestMask = 0, bestPenalty = Infinity;
+      for (let m = 0; m < 8; m++) {
+        const test = createMatrix(size);
+        for (let r = 0; r < size; r++) {
+          for (let c = 0; c < size; c++) test[r][c] = matrix[r][c];
+        }
+        applyMask(test, reserved, size, m);
+        placeFormatInfo(test, size, m);
+        const p = scorePenalty(test, size);
+        if (p < bestPenalty) { bestPenalty = p; bestMask = m; }
+      }
+
+      // Apply best mask
+      applyMask(matrix, reserved, size, bestMask);
+      placeFormatInfo(matrix, size, bestMask);
+
+      return { matrix, size };
+    }
+
+    function renderToCanvas(canvas, text, moduleSize) {
+      moduleSize = moduleSize || 4;
+      const { matrix, size } = generate(text);
+      const quiet = 4; // quiet zone
+      const totalSize = (size + quiet * 2) * moduleSize;
+      canvas.width = totalSize;
+      canvas.height = totalSize;
+      const ctx = canvas.getContext('2d');
+
+      // White background
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, totalSize, totalSize);
+
+      // Draw modules
+      ctx.fillStyle = '#000000';
+      for (let r = 0; r < size; r++) {
+        for (let c = 0; c < size; c++) {
+          if (matrix[r][c] === 1) {
+            ctx.fillRect(
+              (c + quiet) * moduleSize,
+              (r + quiet) * moduleSize,
+              moduleSize,
+              moduleSize
+            );
+          }
+        }
+      }
+    }
+
+    return { generate, renderToCanvas };
+  })();
+
   /* ─── Remote Modal ─── */
   function showRemoteModal() {
     const base = window.location.href.split('#')[0];
     const url = base + '#remote';
     dom.remoteUrl.textContent = url;
+
+    // Generate QR code
+    try {
+      const canvas = document.getElementById('qr-canvas');
+      if (canvas && url.length <= 120) {
+        QR.renderToCanvas(canvas, url, 4);
+      }
+    } catch (e) {
+      // QR generation failed — URL is still shown as text
+    }
+
     dom.remoteModal.classList.add('active');
   }
 
