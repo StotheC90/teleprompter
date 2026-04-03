@@ -15,7 +15,6 @@
   --emphasis: #00ff88;
   --font-size: 42px;
   --font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
-  --scroll-speed: 2;
   --focus-size: 30vh;
   --btn-bg: #222;
   --btn-hover: #333;
@@ -1163,6 +1162,9 @@ Bis zum nächsten Video!`
   function exitPrompter() {
     pause();
     clearTimerCheck();
+    // Clear all active countdown timer intervals (prevent memory leak)
+    Object.keys(state.timerIntervals).forEach(id => clearInterval(state.timerIntervals[id]));
+    state.timerIntervals = {};
     if (document.fullscreenElement) {
       document.exitFullscreen().catch(() => {});
     }
@@ -1453,8 +1455,14 @@ Bis zum nächsten Video!`
   }
 
   /* ─── File Upload ─── */
+  const MAX_FILE_SIZE = 1024 * 1024; // 1 MB
+
   function handleFileUpload(file) {
     if (!file) return;
+    if (file.size > MAX_FILE_SIZE) {
+      alert('Datei zu groß (' + (file.size / 1024 / 1024).toFixed(1) + ' MB). Maximal 1 MB erlaubt.');
+      return;
+    }
     const reader = new FileReader();
     reader.onload = function (e) {
       dom.textarea.value = e.target.result;
@@ -1977,11 +1985,13 @@ Bis zum nächsten Video!`
 
   /* ─── Event Listeners ─── */
 
-  // Editor
+  // Editor (debounced save to prevent micro-jank with long texts)
+  let saveDebounceTimer = null;
   dom.textarea.addEventListener('input', () => {
     state.text = dom.textarea.value;
     updateEditorStats();
-    saveState();
+    clearTimeout(saveDebounceTimer);
+    saveDebounceTimer = setTimeout(saveState, 300);
   });
 
   dom.speedSlider.addEventListener('input', () => {
