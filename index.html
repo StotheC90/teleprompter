@@ -1023,7 +1023,16 @@ Bis zum nächsten Video!`
     voiceSyncRecognition: null,
     voiceSyncWordIndex: 0,
     voiceSyncWords: [],
-    voiceSyncSupported: !!(window.SpeechRecognition || window.webkitSpeechRecognition)
+    voiceSyncSupported: !!(window.SpeechRecognition || window.webkitSpeechRecognition),
+    // Adaptive scroll state
+    vsLastMatchTime: 0,
+    vsWordsPerSec: 0,
+    vsTargetScrollTop: 0,
+    vsCurrentScrollTop: 0,
+    vsAnimFrame: null,
+    vsSpeechActive: false,       // true while speech is detected
+    vsSilenceTimer: null,        // timeout to detect silence
+    vsSpeedHistory: []           // rolling window of wps measurements
   };
 
   /* ─── DOM References ─── */
@@ -1591,7 +1600,6 @@ Bis zum nächsten Video!`
       if (!spoken) continue;
       for (let i = searchStart; i < searchEnd; i++) {
         if (words[i].word === spoken || voiceSyncLevenshteinClose(words[i].word, spoken)) {
-          // Prefer matches that are ahead of the current position
           if (i >= state.voiceSyncWordIndex || bestMatchIndex === -1) {
             bestMatchIndex = i;
           }
@@ -1601,25 +1609,120 @@ Bis zum nächsten Video!`
     }
 
     if (bestMatchIndex >= 0) {
+      const now = performance.now();
+      const prevIndex = state.voiceSyncWordIndex;
+
+      // Calculate speaking speed (words per second)
+      if (state.vsLastMatchTime > 0 && bestMatchIndex > prevIndex) {
+        const elapsed = (now - state.vsLastMatchTime) / 1000;
+        if (elapsed > 0.05 && elapsed < 5) { // ignore unrealistic values
+          const wordsSpoken = bestMatchIndex - prevIndex;
+          const wps = wordsSpoken / elapsed;
+          // Rolling average of last 8 measurements for smooth speed
+          state.vsSpeedHistory.push(wps);
+          if (state.vsSpeedHistory.length > 8) state.vsSpeedHistory.shift();
+          state.vsWordsPerSec = state.vsSpeedHistory.reduce((a, b) => a + b, 0) / state.vsSpeedHistory.length;
+        }
+      }
+
+      state.vsLastMatchTime = now;
       state.voiceSyncWordIndex = bestMatchIndex + 1;
-      scrollToVoiceSyncWord(state.voiceSyncWords[bestMatchIndex]);
+
+      // Mark speech as active, reset silence timer
+      state.vsSpeechActive = true;
+      clearTimeout(state.vsSilenceTimer);
+      state.vsSilenceTimer = setTimeout(function () {
+        state.vsSpeechActive = false;
+      }, 2000); // 2s silence = stop predictive scroll
+
+      // Set target scroll position
+      setVoiceSyncTarget(words[bestMatchIndex]);
     }
   }
 
-  function scrollToVoiceSyncWord(wordInfo) {
-    const element = wordInfo.element;
+  function setVoiceSyncTarget(wordInfo) {
+    var element = wordInfo.element;
     if (!element) return;
 
-    const scrollEl = dom.prompterScroll;
-    const targetTop = element.offsetTop - scrollEl.clientHeight / 2;
+    var scrollEl = dom.prompterScroll;
+    state.vsTargetScrollTop = Math.max(0, element.offsetTop - scrollEl.clientHeight / 2);
 
-    scrollEl.scrollTo({
-      top: Math.max(0, targetTop),
-      behavior: 'smooth'
-    });
+    // Start adaptive scroll loop if not running
+    if (!state.vsAnimFrame) {
+      state.vsCurrentScrollTop = scrollEl.scrollTop;
+      vsAdaptiveScrollLoop();
+    }
+  }
+
+  // Adaptive scroll loop: smoothly interpolates toward the target
+  // and predicts ahead based on measured speaking speed
+  function vsAdaptiveScrollLoop() {
+    if (!state.voiceSyncActive) {
+      state.vsAnimFrame = null;
+      return;
+    }
+
+    var scrollEl = dom.prompterScroll;
+    var current = scrollEl.scrollTop;
+    var target = state.vsTargetScrollTop;
+
+    // Predictive scrolling: if speech is active, slowly advance
+    // target based on measured words-per-second
+    if (state.vsSpeechActive && state.vsWordsPerSec > 0 && state.voiceSyncWords.length > 0) {
+      var nextWordIdx = Math.min(state.voiceSyncWordIndex, state.voiceSyncWords.length - 1);
+      var nextWord = state.voiceSyncWords[nextWordIdx];
+      if (nextWord && nextWord.element) {
+        var nextTarget = nextWord.element.offsetTop - scrollEl.clientHeight / 2;
+        // Gently pull toward the next word position at the measured pace
+        var pixelsBetweenWords = Math.abs(nextTarget - target);
+        var predictivePx = pixelsBetweenWords * state.vsWordsPerSec * (1 / 60);
+        // Only predict a small amount to avoid overshooting
+        target += Math.min(predictivePx, 3);
+        state.vsTargetScrollTop = target;
+      }
+    }
+
+    // Smooth interpolation: ease toward target (lerp)
+    // Fast catch-up when far away, gentle when close
+    var diff = target - current;
+    var maxScroll = scrollEl.scrollHeight - scrollEl.clientHeight;
+
+    if (Math.abs(diff) < 0.5) {
+      // Close enough, snap
+      scrollEl.scrollTop = target;
+    } else {
+      // Lerp factor: faster when further away
+      var lerpSpeed = Math.min(0.12, 0.04 + Math.abs(diff) / 5000);
+      scrollEl.scrollTop = current + diff * lerpSpeed;
+    }
+
+    // Clamp
+    if (scrollEl.scrollTop >= maxScroll - 2) {
+      scrollEl.scrollTop = maxScroll;
+    }
 
     state.scrollPos = scrollEl.scrollTop;
     updateProgress();
+
+    // Update voice sync indicator ~2x per second
+    state._vsFrameCount = (state._vsFrameCount || 0) + 1;
+    if (state._vsFrameCount % 30 === 0) {
+      updateVoiceSyncUI('listening');
+    }
+
+    state.vsAnimFrame = requestAnimationFrame(vsAdaptiveScrollLoop);
+  }
+
+  function stopVoiceSyncScroll() {
+    if (state.vsAnimFrame) {
+      cancelAnimationFrame(state.vsAnimFrame);
+      state.vsAnimFrame = null;
+    }
+    clearTimeout(state.vsSilenceTimer);
+    state.vsWordsPerSec = 0;
+    state.vsSpeedHistory = [];
+    state.vsLastMatchTime = 0;
+    state.vsSpeechActive = false;
   }
 
   function findNearestWordIndex() {
@@ -1710,6 +1813,7 @@ Bis zum nächsten Video!`
   function stopVoiceSync() {
     if (!state.voiceSyncActive) return;
     state.voiceSyncActive = false;
+    stopVoiceSyncScroll();
     if (state.voiceSyncRecognition) {
       try { state.voiceSyncRecognition.stop(); } catch (e) { /* already stopped */ }
       state.voiceSyncRecognition = null;
@@ -1747,10 +1851,13 @@ Bis zum nächsten Video!`
 
     if (indicator) {
       if (status === 'listening') {
-        indicator.textContent = '\uD83C\uDFA4 Voice Sync aktiv';
-        indicator.style.color = '#0f0';
+        var wpsInfo = state.vsWordsPerSec > 0
+          ? ' (' + state.vsWordsPerSec.toFixed(1) + ' W/s)'
+          : ' (warte auf Sprache...)';
+        indicator.textContent = '\uD83C\uDFA4 Voice Sync aktiv' + wpsInfo;
+        indicator.style.color = state.vsSpeechActive ? '#0f0' : '#0a0';
       } else if (status === 'error') {
-        indicator.textContent = '\uD83C\uDFA4 Fehler — Mikrofon prüfen';
+        indicator.textContent = '\uD83C\uDFA4 Fehler — Mikrofon pr\u00fcfen';
         indicator.style.color = 'var(--warning)';
       } else {
         indicator.textContent = '';
