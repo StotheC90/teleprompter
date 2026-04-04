@@ -274,8 +274,15 @@ input[type="range"]::-moz-range-thumb {
 /* Scroll container */
 .prompter-scroll {
   flex: 1;
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
   position: relative;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+
+.prompter-scroll::-webkit-scrollbar {
+  display: none;
 }
 
 .prompter-content {
@@ -1028,6 +1035,9 @@ Bis zum nächsten Video!`
     controlsTimeout: null,
     timerIntervals: {},
     timerCheckInterval: null,
+    manualScrolling: false,
+    manualScrollTimer: null,
+    programmaticScroll: false,
     voiceSyncActive: false,
     voiceSyncRecognition: null,
     voiceSyncWordIndex: 0,
@@ -1296,7 +1306,15 @@ Bis zum nächsten Video!`
 
     // pixels per frame = speed * base_rate * (elapsed / 16.67)
     // base_rate = 1px per frame at 60fps at speed 1
+    // Skip this frame if user is manually scrolling
+    if (state.manualScrolling) {
+      state.lastTimestamp = null;
+      state.animFrameId = requestAnimationFrame(scrollStep);
+      return;
+    }
+
     const pixelsPerFrame = state.speed * 1.0 * (elapsed / 16.667);
+    state.programmaticScroll = true;
     dom.prompterScroll.scrollTop += pixelsPerFrame;
 
     state.scrollPos = dom.prompterScroll.scrollTop;
@@ -1694,6 +1712,12 @@ Bis zum nächsten Video!`
       return;
     }
 
+    // Pause adaptive scroll while user is manually scrolling
+    if (state.manualScrolling) {
+      state.vsAnimFrame = requestAnimationFrame(vsAdaptiveScrollLoop);
+      return;
+    }
+
     var scrollEl = dom.prompterScroll;
     var current = scrollEl.scrollTop;
     var target = state.vsTargetScrollTop;
@@ -1719,16 +1743,14 @@ Bis zum nächsten Video!`
     var diff = target - current;
     var maxScroll = scrollEl.scrollHeight - scrollEl.clientHeight;
 
+    state.programmaticScroll = true;
     if (Math.abs(diff) < 0.5) {
-      // Close enough, snap
       scrollEl.scrollTop = target;
     } else {
-      // Lerp factor: faster when further away
       var lerpSpeed = Math.min(0.12, 0.04 + Math.abs(diff) / 5000);
       scrollEl.scrollTop = current + diff * lerpSpeed;
     }
 
-    // Clamp
     if (scrollEl.scrollTop >= maxScroll - 2) {
       scrollEl.scrollTop = maxScroll;
     }
@@ -2571,14 +2593,49 @@ Bis zum nächsten Video!`
     startVoiceSync();
   });
 
+  // Detect manual scrolling (touch drag or mouse wheel)
+  dom.prompterScroll.addEventListener('scroll', () => {
+    if (state.programmaticScroll) {
+      state.programmaticScroll = false;
+      return;
+    }
+    // User is manually scrolling
+    state.manualScrolling = true;
+    state.scrollPos = dom.prompterScroll.scrollTop;
+    updateProgress();
+    showControls();
+
+    // Resume auto-scroll after 2s of no manual scrolling
+    clearTimeout(state.manualScrollTimer);
+    state.manualScrollTimer = setTimeout(() => {
+      state.manualScrolling = false;
+      // Update voice sync position if active
+      if (state.voiceSyncActive && state.voiceSyncWords.length) {
+        state.voiceSyncWordIndex = findNearestWordIndex();
+        state.vsTargetScrollTop = dom.prompterScroll.scrollTop;
+      }
+    }, 2000);
+  }, { passive: true });
+
   // Prompter mouse move → show controls
   dom.prompterView.addEventListener('mousemove', showControls);
 
-  // Prompter touch tap → play/pause
+  // Prompter tap → play/pause (but not on drag/swipe)
+  let _tapStartX = 0, _tapStartY = 0, _tapStartTime = 0;
+  dom.prompterScroll.addEventListener('pointerdown', (e) => {
+    _tapStartX = e.clientX;
+    _tapStartY = e.clientY;
+    _tapStartTime = Date.now();
+  });
   dom.prompterScroll.addEventListener('click', (e) => {
-    // Don't toggle if clicking controls
     if (dom.controls.contains(e.target)) return;
-    togglePlayPause();
+    // Only toggle on tap (minimal movement, short duration)
+    const dx = Math.abs(e.clientX - _tapStartX);
+    const dy = Math.abs(e.clientY - _tapStartY);
+    const dt = Date.now() - _tapStartTime;
+    if (dx < 15 && dy < 15 && dt < 300) {
+      togglePlayPause();
+    }
   });
 
   // Remote modal
