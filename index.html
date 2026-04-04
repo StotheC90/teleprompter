@@ -288,6 +288,15 @@ input[type="range"]::-moz-range-thumb {
   word-wrap: break-word;
 }
 
+.prompter-line {
+  display: block;
+}
+
+.prompter-line.empty-line {
+  display: block;
+  height: 0.5em;
+}
+
 /* Focus zone (spotlight effect) */
 .focus-overlay-top,
 .focus-overlay-bottom {
@@ -1176,10 +1185,16 @@ Bis zum nächsten Video!`
           return '<span class="timer-cue" data-timer-id="' + id + '" data-seconds="' + seconds + '">' + seconds + 's</span>';
         });
 
-        // Convert newlines to <br>
-        safe = safe.replace(/\n/g, '<br>');
-
-        html += safe;
+        // Convert newlines: wrap each line in a span for positioning
+        const lines = safe.split('\n');
+        for (let li = 0; li < lines.length; li++) {
+          const line = lines[li];
+          if (line.trim() === '') {
+            html += '<span class="prompter-line empty-line"></span>';
+          } else {
+            html += '<span class="prompter-line">' + line + '</span>';
+          }
+        }
       }
     }
 
@@ -1545,8 +1560,14 @@ Bis zum nächsten Video!`
       if (node.nodeType === Node.TEXT_NODE) {
         const text = node.textContent;
         if (!text.trim()) return;
-        // Use the parent element for scroll targeting (.emphasis span, or prompter-content itself)
-        const lineEl = node.parentElement;
+        // Find nearest positioned parent (prompter-line, emphasis, section-heading)
+        // Never use prompter-content itself — its offsetTop is always 0
+        let lineEl = node.parentElement;
+        while (lineEl && lineEl === content) {
+          // Fallback: shouldn't happen with prompter-line wrapping, but safety net
+          lineEl = null;
+        }
+        if (!lineEl) return;
         const nodeWords = text.split(/\s+/).filter(w => w.trim());
         for (const w of nodeWords) {
           const normalized = normalizeWord(w);
@@ -1640,12 +1661,23 @@ Bis zum nächsten Video!`
     }
   }
 
+  function getOffsetTopRelativeTo(element, container) {
+    var top = 0;
+    var el = element;
+    while (el && el !== container) {
+      top += el.offsetTop;
+      el = el.offsetParent;
+    }
+    return top;
+  }
+
   function setVoiceSyncTarget(wordInfo) {
     var element = wordInfo.element;
     if (!element) return;
 
     var scrollEl = dom.prompterScroll;
-    state.vsTargetScrollTop = Math.max(0, element.offsetTop - scrollEl.clientHeight / 2);
+    var elementTop = getOffsetTopRelativeTo(element, scrollEl);
+    state.vsTargetScrollTop = Math.max(0, elementTop - scrollEl.clientHeight / 2);
 
     // Start adaptive scroll loop if not running
     if (!state.vsAnimFrame) {
@@ -1672,7 +1704,7 @@ Bis zum nächsten Video!`
       var nextWordIdx = Math.min(state.voiceSyncWordIndex, state.voiceSyncWords.length - 1);
       var nextWord = state.voiceSyncWords[nextWordIdx];
       if (nextWord && nextWord.element) {
-        var nextTarget = nextWord.element.offsetTop - scrollEl.clientHeight / 2;
+        var nextTarget = getOffsetTopRelativeTo(nextWord.element, scrollEl) - scrollEl.clientHeight / 2;
         // Gently pull toward the next word position at the measured pace
         var pixelsBetweenWords = Math.abs(nextTarget - target);
         var predictivePx = pixelsBetweenWords * state.vsWordsPerSec * (1 / 60);
@@ -1726,9 +1758,11 @@ Bis zum nächsten Video!`
   }
 
   function findNearestWordIndex() {
-    const scrollCenter = dom.prompterScroll.scrollTop + dom.prompterScroll.clientHeight / 2;
+    const scrollEl = dom.prompterScroll;
+    const scrollCenter = scrollEl.scrollTop + scrollEl.clientHeight / 2;
     for (let i = 0; i < state.voiceSyncWords.length; i++) {
-      if (state.voiceSyncWords[i].element.offsetTop >= scrollCenter) {
+      var elTop = getOffsetTopRelativeTo(state.voiceSyncWords[i].element, scrollEl);
+      if (elTop >= scrollCenter) {
         return Math.max(0, i - 1);
       }
     }
